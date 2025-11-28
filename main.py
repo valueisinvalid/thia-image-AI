@@ -1,11 +1,33 @@
+import os
+from pathlib import Path
 from google import genai
 from PIL import Image
 from io import BytesIO
 
+
+def _load_env_file(path: str = ".env") -> None:
+    """Populate os.environ from a simple KEY=VALUE .env file if it exists."""
+    env_path = Path(path)
+    if not env_path.exists():
+        return
+    for line in env_path.read_text().splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, value = stripped.split("=", 1)
+        os.environ.setdefault(key.strip(), value.strip())
+
+
+_load_env_file()
+
 # 1. İstemciyi başlatma (Anahtarı doğrudan tırnak içine yazıyoruz)
 # NOT: Lütfen önceki uyarımda dediğim gibi bu anahtarı silip YENİSİNİ oluştur.
 # Yeni oluşturduğun anahtarı aşağıya yapıştır.
-client = genai.Client(api_key="AIzaSyCjU5W4OkxYvGlbAhg7jbMo-tWKY-SovJc") 
+api_key = os.environ.get("GOOGLE_API_KEY")
+if not api_key:
+    raise RuntimeError("Set GOOGLE_API_KEY as an environment variable or in .env")
+
+client = genai.Client(api_key=api_key) 
 
 try:
     # 2. Resmi bilgisayardan okuma
