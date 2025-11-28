@@ -1,8 +1,12 @@
+import asyncio
 import os
-from pathlib import Path
-from google import genai
-from PIL import Image
 from io import BytesIO
+from pathlib import Path
+
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.responses import StreamingResponse
+from google import genai
+from PIL import Image, UnidentifiedImageError
 
 
 def _load_env_file(path: str = ".env") -> None:
@@ -20,42 +24,78 @@ def _load_env_file(path: str = ".env") -> None:
 
 _load_env_file()
 
-# 1. İstemciyi başlatma (Anahtarı doğrudan tırnak içine yazıyoruz)
-# NOT: Lütfen önceki uyarımda dediğim gibi bu anahtarı silip YENİSİNİ oluştur.
-# Yeni oluşturduğun anahtarı aşağıya yapıştır.
 api_key = os.environ.get("GOOGLE_API_KEY")
 if not api_key:
     raise RuntimeError("Set GOOGLE_API_KEY as an environment variable or in .env")
 
-client = genai.Client(api_key=api_key) 
+client = genai.Client(api_key=api_key)
 
-try:
-    # 2. Resmi bilgisayardan okuma
-    print("Resim okunuyor...")
-    image = Image.open("mozge.JPG")
+app = FastAPI(
+    title="Karikatür Üretici API",
+    description="Gemini tabanlı karikatür üretim servisi",
+    version="1.0.0",
+)
 
-    # 3. Prompt (Senin yazdığın karikatür isteği)
-    prompt = "Bu görüntüdeki kişinin eğlenceli ve abartılı bir karikatür çizimini yap. Kalın siyah kontur çizgileri ve canlı, düz renkler kullan. Uzay galaksi ve quantum spark temalı, enerjik bir hava ver. Arka plan basit, tek renkli ve temiz olsun."
+DEFAULT_PROMPT = (
+    "Bu görüntüdeki kişinin eğlenceli ve abartılı bir karikatür çizimini yap. "
+    "Kalın siyah kontur çizgileri ve canlı, düz renkler kullan. Uzay galaksi "
+    "ve quantum spark temalı, enerjik bir hava ver. Arka plan basit, tek renkli "
+    "ve temiz olsun."
+)
 
-    print("Yapay zeka çizime başladı (Bu işlem 5-10 saniye sürebilir)...")
-    
-    # 4. Modele gönderme (Yeni SDK syntax'ı)
+
+def _generate_caricature(image_bytes: bytes, prompt: str) -> BytesIO:
+    """Blocking helper that sends the request to Gemini and returns image bytes."""
+    try:
+        pil_image = Image.open(BytesIO(image_bytes))
+    except UnidentifiedImageError as exc:
+        raise ValueError("Geçerli bir görüntü dosyası yükleyin.") from exc
+
     response = client.models.generate_content(
-        model="gemini-2.5-flash-image", # Güncel model ismi
-        contents=[prompt, image],
-        config={
-            "response_modalities": ["IMAGE"]
-        }
+        model="gemini-2.5-flash-image",
+        contents=[prompt, pil_image],
+        config={"response_modalities": ["IMAGE"]},
     )
 
-    # 5. Sonucu kaydetme
-    if response.candidates[0].content.parts[0].inline_data:
-        image_data = response.candidates[0].content.parts[0].inline_data.data
-        img_out = Image.open(BytesIO(image_data))
-        img_out.save("mozge_karikatur.png")
-        print("Harika! Karikatür 'natalie_karikatur.png' olarak kaydedildi.")
-    else:
-        print("Bir sorun oluştu, resim dönmedi.")
+    inline_data = response.candidates[0].content.parts[0].inline_data
+    if not inline_data:
+        raise RuntimeError("Model görüntü üretmedi, lütfen tekrar deneyin.")
 
-except Exception as e:
-    print(f"Hata detayı: {e}")
+    output_io = BytesIO(inline_data.data)
+    output_io.seek(0)
+    return output_io
+
+
+@app.get("/")
+def health_check() -> dict[str, str]:
+    return {"status": "ok", "message": "Karikatür servisi hazır."}
+
+
+@app.post("/caricature")
+async def create_caricature(
+    image: UploadFile = File(..., description="Karikatürü yapılacak görüntü"),
+    prompt: str = Form(DEFAULT_PROMPT),
+):
+    file_bytes = await image.read()
+    loop = asyncio.get_running_loop()
+
+    try:
+        caricature_io = await loop.run_in_executor(
+            None, _generate_caricature, file_bytes, prompt
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except Exception as exc:  # pragma: no cover - unexpected errors
+        raise HTTPException(status_code=500, detail="Bilinmeyen bir hata oluştu.") from exc
+
+    filename = Path(image.filename or "karikatur").stem + "_caricature.png"
+    headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
+    return StreamingResponse(caricature_io, media_type="image/png", headers=headers)
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
